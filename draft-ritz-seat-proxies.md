@@ -4,8 +4,8 @@ abbrev: "SEAT Proxies"
 docname: draft-ritz-seat-proxies-latest
 category: std
 ipr: trust200902
-area: Security
-workgroup: SEAT
+area: "Security"
+workgroup: "Secure Evidence and Attestation Transport"
 submissiontype: IETF
 keyword: [remote attestation, TLS-terminating proxy, HPKE, extended key update, CMW, RATS Privacy Framework]
 
