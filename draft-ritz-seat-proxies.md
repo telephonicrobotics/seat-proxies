@@ -20,7 +20,7 @@ author:
   organization: ARM
   email: ionut.mihalcea@arm.com
 - fullname: Hannes Tschofenig
-  organization: Siemens
+  organization: UniBw M.
   email: hannes.tschofenig@gmx.net
 - fullname: Tirumaleswar Reddy
   organization: Nokia
@@ -756,3 +756,9 @@ conditional on its presence in the corresponding ClientHello.
 {:numbered="false"}
 
 TODO
+
+# Changelog
+{:numbered="false"}
+
+-00 Initial revision
+
