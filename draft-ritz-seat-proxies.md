@@ -20,8 +20,13 @@ author:
   organization: ARM
   email: ionut.mihalcea@arm.com
 - fullname: Hannes Tschofenig
-  organization: University of Applied Sciences Bonn-Rhein-Sieg
-  email: Hannes.Tschofenig@gmx.net
+  organization: University of the Bundeswehr Munich
+  abbrev: UniBw M.
+  city: Neubiberg
+  region: Bavaria
+  country: Germany
+  code: 85577
+  email: hannes.tschofenig@gmx.net
 - fullname: Tirumaleswar Reddy
   organization: Nokia
   email: kondtir@gmail.com
