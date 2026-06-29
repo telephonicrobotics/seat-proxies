@@ -28,8 +28,6 @@ author:
 
 normative:
   RFC9334:
-  RFC2119:
-  RFC8174:
   RFC5869:
   RFC7517:
   RFC8446:
@@ -40,6 +38,8 @@ normative:
   I-D.ietf-rats-ear:
 
 informative:
+  RFC9261:
+  RFC9266:
   I-D.ietf-rats-multi-verifier:
   I-D.ounsworth-rats-privacy-framework:
   I-D.fossati-seat-expat:
@@ -53,12 +53,33 @@ informative:
 
 This document specifies a transport-layer mechanism to establish an
 end-to-end cryptographic channel across a cooperative secure channel
-protocol intermediary proxy (such as terminating TLS).  In enterprise
-deployments, intermediaries routinely terminate secure channel
-connections for access control and policy enforcement.  However, this
-termination severs the end-to-end cryptographic transcript binding
-required by protocols integrating Remote Attestation over secure
-channel protocols such as TLS.
+protocol intermediary, such as a TLS-terminating proxy.
+
+The mechanism enables Remote Attestation Evidence to remain bound to the
+true end-to-end endpoints even when the initial secure channel handshake
+is mediated by an intermediary.  It uses an ephemeral HPKE challenge
+exchange, intra-handshake Evidence delivery, and an attestation-bound key
+update to evict the intermediary from Layer 7 visibility before
+application data is exchanged.
+
+--- middle
+
+# Introduction
+
+This document operates within the Remote ATtestation procedureS
+(RATS) architecture {{RFC9334}} and addresses a specific deployment
+constraint: the presence of a TLS-terminating intermediary in the
+path between a RATS Attester and its Relying Party.
+
+A prominent class of deployments where this condition fails is the
+enterprise environment.  Organizations deploying MDM-enrolled,
+enterprise-controlled devices routinely route device-to-service
+traffic through TLS-terminating infrastructure -- corporate reverse
+proxies, API gateways, mobile device management policy enforcement
+points, and enterprise web application firewalls.  In these
+environments, the device holds a TLS connection to enterprise-managed
+infrastructure, not to the remote attested origin with which it
+ultimately communicates.
 
 Major platform vendors, including cloud productivity and device
 management providers, regularly publish lists of endpoints for which
@@ -66,12 +87,36 @@ TLS inspection must be disabled, sometimes referred to as compliance
 modes.  These exclusions are necessary to prevent the intermediary
 from interfering with the trust mechanisms those endpoints depend on.
 These existing modes provide an opportunity to integrate Remote
-Attestation, replacing "administrative trust" with cryptographic-proof
+Attestation, replacing "administrative trust" with cryptographic proof
 that an intermediary is not party to sensitive application data.
 
---- middle
+When a TLS-terminating intermediary is present, the client
+establishes a TLS connection to the intermediary, and the
+intermediary establishes a separate connection to the origin.  The
+two connections have independent handshake transcripts.  Intra-
+handshake attestation protocols that cryptographically bind Evidence
+to the connection transcript are therefore binding to the client-to-
+intermediary connection, not to the connection to the origin.  Any
+attestation produced by the origin references a different
+cryptographic context than the one the client holds.  The end-to-end
+binding on which transport-layer attestation depends is severed at
+the proxy boundary.
 
-# Conventions and Definitions
+This document defines a cryptographic transport and proxy eviction
+mechanism. It does not define attestation Evidence profiles, claim
+formats, or identity document structures.
+
+The mechanism establishes binding for both intra-handshake attestation
+(for example, Early Attestation
+{{I-D.fossati-seat-early-attestation}}) and post-handshake attestation
+(for example, EXPAT {{I-D.fossati-seat-expat}}).
+
+These are named as examples; the mechanism is agnostic to the specific
+attestation protocol. For intra-handshake Evidence delivery, this
+document uses the `attestation` extension defined in
+{{I-D.fossati-seat-early-attestation}}.
+
+# Terminology
 
 {::boilerplate bcp14-tagged}
 
@@ -83,7 +128,10 @@ Cooperative intermediary:
   transition to Layer 4 forwarding upon key rotation.  A cooperative
   intermediary is not part of the origin's Trusted Computing Base.
 
-Origin:
+Client (Relying Party, RP):
+: The endpoint that verifies the origin's attested properties.
+
+Origin (Attesting Server):
 : The endpoint whose attested properties the client wishes to verify,
   reachable only through one or more intermediaries.
 
@@ -99,7 +147,7 @@ Origin KEM key (pkR):
 
 Identity Document:
 : A signed document such as an EAT Attestation Result (EAR)
-  {{I-D.ietf-rats-ear}} The Identity Document carries pkR.  The signature
+  {{I-D.ietf-rats-ear}}.  The Identity Document carries pkR.  The signature
   provides a self-contained integrity guarantee, allowing the document
   to be fetched over untrusted channels.
 
@@ -120,41 +168,28 @@ Attestation Binder:
   exchanged during the HPKE challenge, replacing the severed TLS
   transcript hash as the session anchor.
 
-# Introduction
-
-This document operates within the Remote ATtestation procedureS
-(RATS) architecture {{RFC9334}} and addresses a specific deployment
-constraint: the presence of a TLS-terminating intermediary in the
-path between a RATS Attester and its Relying Party.
-
-A prominent class of deployments where this condition fails is the
-enterprise environment.  Organizations deploying MDM-enrolled,
-enterprise-controlled devices routinely route device-to-service
-traffic through TLS-terminating infrastructure -- corporate reverse
-proxies, API gateways, mobile device management policy enforcement
-points, and enterprise web application firewalls.  In these
-environments, the device holds a TLS connection to enterprise-managed
-infrastructure, not to the remote attested origin with which it
-ultimately communicates.
-
-## The Proxy Binding Problem
-
-When a TLS-terminating intermediary is present, the client
-establishes a TLS connection to the intermediary, and the
-intermediary establishes a separate connection to the origin.  The
-two connections have independent handshake transcripts.  Intra-
-handshake attestation protocols that cryptographically bind Evidence
-to the connection transcript are therefore binding to the client-to-
-intermediary connection, not to the connection to the origin.  Any
-attestation produced by the origin references a different
-cryptographic context than the one the client holds.  The end-to-end
-binding on which transport-layer attestation depends is severed at
-the proxy boundary.
-
-# Integrating Industry Compliance Requirements with Hardware Trust
+# Overview
 
 A TLS-terminating intermediary severs the RA+TLS channel binding on
-which attestation depends, regardless of when attestation occurs.
+which attestation depends, regardless of when attestation occurs.  Major
+platform vendors already define endpoint sets for which TLS inspection
+must be disabled in order to preserve endpoint-specific trust
+properties.  This document reuses that operational pattern and replaces
+administrative exclusion with a cryptographic mechanism: the proxy
+cooperates during handshake-time signalling, forwards encrypted
+Evidence without decrypting it, and is then mechanically evicted from
+Layer 7 visibility by an attestation-bound key update.
+
+The mechanism is designed against the trust-boundary requirements
+identified for proxy-fronted attested channels. An implementation
+conforming to this document:
+
+1.  MUST establish a channel identity that is cryptographically bound
+    to the attested origin endpoint even though connection
+    establishment traverses a TLS-terminating intermediary.
+
+2.  MUST use object-layer encryption for Evidence payloads to maintain
+    confidentiality from the Layer 7 intermediary.
 
 ## Architectural Advantages
 
@@ -170,85 +205,12 @@ coverage without modification, extending equally to legacy and modern
 software in the same estate.
 
 **Evidence privacy.**  Evidence is encrypted independently of the TLS
-session using object-level encryption as specified in
+session using object-level encryption.  The privacy motivation for
+object-level protection in RATS deployments is discussed in
 {{I-D.ounsworth-rats-privacy-framework}}.  The cooperative intermediary
 can read plaintext CMW routing headers but cannot access the Evidence
 payload, maintaining confidentiality of an Attester's measurements from
 infrastructure outside the broader network of trust.
-
-# Scope and Relationship to Other Work
-
-This document defines a cryptographic transport and proxy eviction
-mechanism. It does NOT define attestation Evidence profiles, claim
-formats, or identity document structures.
-
-This document aims to establish binding for both intra-handshake
-attestation (for example, Early Attestation
-{{I-D.fossati-seat-early-attestation}}) and post-handshake attestation
-(for example, EXPAT {{I-D.fossati-seat-expat}}).
-
-These are named as examples; the mechanism is agnostic to the specific
-attestation protocol. For intra-handshake Evidence delivery it utilizes
-the `attestation` extension defined in
-{{I-D.fossati-seat-early-attestation}}.
-
-## Relationship to WIMSE Workload Attestation
-
-{{I-D.reddy-wimse-workload-attestation}} addresses the same deployment
-topology at the HTTP application layer, requiring no changes to TLS or
-proxy infrastructure.  This document operates at the transport layer and
-is applicable independently of application protocol.  WIMSE Workload
-Attestation addresses deployments where application-layer carry of
-attestation information is readily available or where cooperative TLS
-intermediaries are not available.
-
-## Relationship to Remote Attestation over EDHOC
-
-The structural problem this document addresses is not specific to TLS.
-Remote Attestation over EDHOC {{I-D.ietf-lake-ra}} defines an
-Attestation Binder derived from the EDHOC transcript, serving the same
-relay-attack mitigation function as the transcript-based binder in TLS.
-When a gateway terminates EDHOC between an Attester and its ultimate
-Relying Party, that binding is severed at the gateway boundary, creating
-conditions for a relay attack regardless of whether the Evidence payload
-is sensitive.  The cooperative blind-routing pattern defined in this
-document is architecturally applicable to this scenario; however, that
-treatment is out of scope for the current revision of this document
-(-00).
-
-## Applicability to Multi-Verifier Deployments
-
-In the hierarchical multi-verifier topology defined in
-{{I-D.ietf-rats-multi-verifier}}, a Lead Verifier coordinates appraisal
-of a Composite Attester by receiving all Composite Evidence, decomposing
-it, and routing Partial Evidence to the appropriate Component Verifiers.
-
-This structural position gives the Lead Verifier visibility into
-Evidence it may not be authorised to appraise — a concern explicitly
-identified in the Privacy Considerations of
-{{I-D.ietf-rats-multi-verifier}}, which notes that Evidence containing
-sensitive information should be encrypted so that it can only be
-accessed by the intended Verifier.
-
-The cooperative blind-routing pattern defined in this document is
-applicable at the appraisal layer: object-level encryption of Partial
-Evidence to the target Component Verifier's key, with CMW plaintext
-headers carrying the routing directive, allows the Lead Verifier to
-route Evidence it cannot read — converting an operational recommendation
-into a cryptographic guarantee.
-
-# Protocol Architecture and Requirements
-
-The mechanism is designed against the trust-boundary requirements
-identified for proxy-fronted attested channels. An implementation
-conforming to this document:
-
-1.  1.  MUST establish a channel identity that is cryptographically
-    bound to the attested origin endpoint even though connection
-    establishment traverses a TLS-terminating intermediary.
-
-2.  2.  MUST use object-layer encryption for Evidence payloads to
-    maintain confidentiality from the Layer 7 intermediary.
 
 ## State Machine
 
@@ -349,42 +311,42 @@ Relying Party            TLS Proxy              Attesting Server
 
 The proxy MUST execute the following steps:
 
-1.  1.  Receive ClientHello from the RP.  If the ClientHello contains an
+1.  Receive ClientHello from the RP.  If the ClientHello contains an
     `nonce_challenge_ext` extension alongside one or more of the
     attestation negotiation extensions defined in Section 6 of
     {{I-D.fossati-seat-early-attestation}}, enter DETECT state.
     Otherwise, process as a standard TLS connection.
 
-2.  2.  Initiate the Leg B connection to the Attesting Server.
+2.  Initiate the Leg B connection to the Attesting Server.
     Construct a ClientHello carrying all negotiation extensions from the
     RP's ClientHello. The `nonce_challenge_ext` extension MUST be
     forwarded with `pkE` and `ctC` unchanged.
 
-3.  3.  Relay the ServerHello received from the Attesting Server to the
+3.  Relay the ServerHello received from the Attesting Server to the
     RP without modification.
 
-4.  4.  Relay the `EncryptedExtensions` received from the Attesting
+4.  Relay the `EncryptedExtensions` received from the Attesting
     Server to the RP.  The `nonce_challenge_ext` extension carrying
     `ctR` MUST be forwarded unchanged.
 
-5.  5.  Receive the `Certificate` message from the Attesting Server.
+5.  Receive the `Certificate` message from the Attesting Server.
     Inspect the plaintext CMW `ind` header of the `cmw_payload` carried
     in the `attestation` extension to determine routing.  Forward the
     `cmw_payload` to the RP without decrypting the Evidence payload.
 
-6.  6.  Relay `CertificateVerify` and `Finished` from the Attesting
+6.  Relay `CertificateVerify` and `Finished` from the Attesting
     Server to the RP.  Enter ARMED state.
 
-7.  7.  Receive the `Certificate` message from the RP.  Inspect the
+7.  Receive the `Certificate` message from the RP.  Inspect the
     plaintext CMW `ind` header and route the `cmw_payload` to the
     Attesting Server.  The Evidence payload MUST NOT be decrypted.
 
-8.  8.  Relay `CertificateVerify` and `Finished` from the RP to the
+8.  Relay `CertificateVerify` and `Finished` from the RP to the
     Attesting Server.
 
-9.  9.  Receive `ExtendedKeyUpdate` from the RP.  Enter TRIGGERED state.
+9.  Receive `ExtendedKeyUpdate` from the RP.  Enter TRIGGERED state.
     Forward the `ExtendedKeyUpdate` to the Attesting Server.  Execute
-    the Buffer Drain procedure defined in Section 6.2.  Activate Layer 4
+    the Buffer Drain procedure defined below.  Activate Layer 4
     transparent forwarding for all subsequent records on both
     connections.
 
@@ -399,7 +361,7 @@ cannot derive `psk_attest`, cannot compute `main_secret_N+1`, and cannot
 derive any traffic key from it.
 
 The DETECT, ARMED, and TRIGGERED state transitions governing eviction
-are defined in Section 3.2.
+are defined in the Proxy Handshake Behavior section.
 
 Buffer Drain:
 : Before activating Layer 4 forwarding, the intermediary MUST complete
@@ -446,7 +408,7 @@ authenticated; trust anchors MAY be self-signed certificates, raw
 public keys, or JWK keys {{RFC7517}}.  The details of trust anchor
 maintenance and path validation are outside the scope of this document.
 
-`pkR` is distributed in an Identity Document: such as an EAR
+`pkR` is distributed in an Identity Document, such as an EAR
 {{I-D.ietf-rats-ear}} whose `ear_managed_keysets` claim carries `pkR`
 as a JWK {{RFC7517}} with `key_ops` set to `["encrypt"]`, under the
 keyset name `"hpke-kem-key"`.  Because the EAR's Verifier signature
@@ -545,7 +507,7 @@ cooperative intermediary can route the evidence without violating the
 confidentiality of the workload, the payload MUST be structured as
 follows:
 
-1.  1.  Evidence Generation: The Attester generates its Evidence (e.g.,
+1.  Evidence Generation: The Attester generates its Evidence (e.g.,
     an EAT) and binds it to the session by placing `rdata` in the
     `eat_nonce` claim, where `rdata` is computed as:
 
@@ -553,20 +515,21 @@ follows:
     rdata = Hash(s_attest_binder || psk_attest)
     ~~~
 
-This commits the signed Evidence to both the KEM public keys (via
-`s_attest_binder`) and the dual-nonce session secret (via `psk_attest`),
-ensuring the quote is bound to the full end-to-end exchange.  To
-cryptographically commit to the proxy-traversing HPKE exchange and
-prevent the TEE from acting as a blind signing oracle, the Evidence MUST
-explicitly include the public parameters of the origin KEM key (`pkR`)
-within the standardized `cnf` claim.
+    This commits the signed Evidence to both the KEM public keys (via
+    `s_attest_binder`) and the dual-nonce session secret (via
+    `psk_attest`), ensuring the quote is bound to the full end-to-end
+    exchange.  To cryptographically commit to the proxy-traversing HPKE
+    exchange and prevent the TEE from acting as a blind signing oracle,
+    the Evidence MUST explicitly include the public parameters of the
+    origin KEM key (`pkR`) within the standardized `cnf` claim.
 
-2.  2.  Object-Level Encryption: To preserve confidentiality from the
+2.  Object-Level Encryption: To preserve confidentiality from the
     terminating intermediary, the Evidence MUST be encrypted to the
-    public key of the receiving endpoint (e.g., using `COSE_Encrypt0`)
-    {{I-D.ounsworth-rats-privacy-framework}}.
+    public key of the receiving endpoint, for example using
+    `COSE_Encrypt0`.  This follows the object-level confidentiality
+    architecture discussed in {{I-D.ounsworth-rats-privacy-framework}}.
 
-3.  3.  CMW Encapsulation: The encrypted envelope is placed inside a
+3.  CMW Encapsulation: The encrypted envelope is placed inside a
     Conceptual Message Wrapper (CMW) Record {{I-D.ietf-rats-msg-wrap}}.
     The outer CMW headers (such as the `ind` field indicating Evidence)
     remain in plaintext.
@@ -578,7 +541,8 @@ connections.  Adapting the routing role of the Lead Verifier
 {{I-D.ietf-rats-multi-verifier}} to a zero-trust posture, the
 intermediary acts only as a router and never as a Verifier: it MUST
 NOT decrypt, decode, or appraise the inner Evidence.  The complete
-routing procedure is defined in Section 3.2, steps 5 and 7.
+routing procedure is defined in the Proxy Handshake Behavior section,
+steps 5 and 7.
 
 # Key Schedule Integration and Proxy Eviction
 
@@ -686,12 +650,14 @@ different origin or a different handshake.
 Because the proxy terminates TLS, the `Certificate` message is visible
 to the proxy in plaintext.  The confidentiality of the Attester's
 Evidence relies entirely on the object-level encryption (e.g.,
-`COSE_Encrypt0`) specified in {{I-D.ounsworth-rats-privacy-framework}}.
-The proxy can only view the unencrypted outer CMW routing headers.  This
-confidentiality guarantee is independent of transport security: the
-Evidence payload remains confidential from the intermediary regardless
-of whether it is cooperative or hostile, because confidentiality is a
-property of the object, not the channel.
+`COSE_Encrypt0`) applied to the Evidence payload.  The proxy can only
+view the unencrypted outer CMW routing headers.  This confidentiality
+guarantee is independent of transport security: the Evidence payload
+remains confidential from the intermediary regardless of whether it is
+cooperative or hostile, because confidentiality is a property of the
+object, not the channel.  The privacy architecture motivating this
+object-level protection is discussed in
+{{I-D.ounsworth-rats-privacy-framework}}.
 
 ## Non-cooperative and Malicious Intermediaries
 
@@ -710,13 +676,13 @@ EXPAT {{I-D.fossati-seat-expat}} that depend on an end-to-end channel,
 this ordering structurally closes the race condition that arises when
 Exported Authenticators operate over a proxy-terminated session.
 
-RFC 9261 Section 5.2.2 explicitly states that if the party
+Section 5.2.2 of {{RFC9261}} explicitly states that if the party
 generating an Exported Authenticator does so on a different connection
-than the party validating it — including situations in which
-application data is sent via a TLS-terminating proxy — the Handshake
+than the party validating it -- including situations in which
+application data is sent via a TLS-terminating proxy -- the Handshake
 Context will not match and the CertificateVerify will not validate.
 
-The `tls-exporter` binding defined in RFC 9266 is unique to each
+The `tls-exporter` binding defined in {{RFC9266}} is unique to each
 TLS connection; a terminating proxy creates two independent sessions
 with independent EKM values, producing exactly this condition.  EXPAT
 {{I-D.fossati-seat-expat}}, which builds on Exported Authenticators,
@@ -761,8 +727,59 @@ conditional on its presence in the corresponding ClientHello.
 
 --- back
 
+# Related Work
+
+This appendix positions the transport-layer proxy eviction mechanism
+defined in this document relative to adjacent work on application-layer
+attestation, gateway-mediated attestation, and multi-verifier
+appraisal.
+
+## Relationship to WIMSE Workload Attestation
+
+{{I-D.reddy-wimse-workload-attestation}} addresses the same deployment
+topology at the HTTP application layer, requiring no changes to TLS or
+proxy infrastructure.  This document operates at the transport layer and
+is applicable independently of application protocol.  WIMSE Workload
+Attestation addresses deployments where application-layer carry of
+attestation information is readily available or where cooperative TLS
+intermediaries are not available.
+
+## Relationship to Remote Attestation over EDHOC
+
+The structural problem this document addresses is not specific to TLS.
+Remote Attestation over EDHOC {{I-D.ietf-lake-ra}} defines an
+Attestation Binder derived from the EDHOC transcript, serving the same
+relay-attack mitigation function as the transcript-based binder in TLS.
+When a gateway terminates EDHOC between an Attester and its ultimate
+Relying Party, that binding is severed at the gateway boundary, creating
+conditions for a relay attack regardless of whether the Evidence payload
+is sensitive.  The cooperative blind-routing pattern defined in this
+document is architecturally applicable to this scenario; however, that
+treatment is out of scope for the current revision of this document
+(-00).
+
+## Applicability to Multi-Verifier Deployments
+
+In the hierarchical multi-verifier topology defined in
+{{I-D.ietf-rats-multi-verifier}}, a Lead Verifier coordinates appraisal
+of a Composite Attester by receiving all Composite Evidence, decomposing
+it, and routing Partial Evidence to the appropriate Component Verifiers.
+
+This structural position gives the Lead Verifier visibility into
+Evidence it may not be authorised to appraise -- a concern explicitly
+identified in the Privacy Considerations of
+{{I-D.ietf-rats-multi-verifier}}, which notes that Evidence containing
+sensitive information should be encrypted so that it can only be
+accessed by the intended Verifier.
+
+The cooperative blind-routing pattern defined in this document is
+applicable at the appraisal layer: object-level encryption of Partial
+Evidence to the target Component Verifier's key, with CMW plaintext
+headers carrying the routing directive, allows the Lead Verifier to
+route Evidence it cannot read -- converting an operational recommendation
+into a cryptographic guarantee.
+
 # Acknowledgments
 {:numbered="false"}
 
 TODO
-
