@@ -1,0 +1,962 @@
+
+
+
+
+Secure Evidence and Attestation Transport                        N. Ritz
+Internet-Draft                                               Independent
+Intended status: Standards Track                             I. Mihalcea
+Expires: 31 December 2026                                            ARM
+                                                           H. Tschofenig
+                          University of Applied Sciences Bonn-Rhein-Sieg
+                                                                T. Reddy
+                                                                   Nokia
+                                                            29 June 2026
+
+
+    Bridging Remote Attestation with Secure Channel Protocol Proxies
+                     draft-ritz-seat-proxies-latest
+
+Abstract
+
+   This document specifies a transport-layer mechanism to establish an
+   end-to-end cryptographic channel across a cooperative secure channel
+   protocol intermediary, such as a TLS-terminating proxy.
+
+   The mechanism enables Remote Attestation Evidence to remain bound to
+   the true end-to-end endpoints even when the initial secure channel
+   handshake is mediated by an intermediary.  It uses an ephemeral HPKE
+   challenge exchange, intra-handshake Evidence delivery, and an
+   attestation-bound key update to evict the intermediary from Layer 7
+   visibility before application data is exchanged.
+
+Discussion Venues
+
+   This note is to be removed before publishing as an RFC.
+
+   Discussion of this document takes place on the Secure Evidence and
+   Attestation Transport Working Group mailing list (seat@ietf.org),
+   which is archived at https://mailarchive.ietf.org/arch/browse/seat.
+
+   Source for this draft and an issue tracker can be found at
+   https://github.com/telephonicrobotics/seat-proxies.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at https://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on 31 December 2026.
+
+Copyright Notice
+
+   Copyright (c) 2026 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents (https://trustee.ietf.org/
+   license-info) in effect on the date of publication of this document.
+   Please review these documents carefully, as they describe your rights
+   and restrictions with respect to this document.  Code Components
+   extracted from this document must include Revised BSD License text as
+   described in Section 4.e of the Trust Legal Provisions and are
+   provided without warranty as described in the Revised BSD License.
+
+Table of Contents
+
+   1.  Introduction
+   2.  Terminology
+   3.  Overview
+     3.1.  Architectural Advantages
+     3.2.  State Machine
+     3.3.  Proxy Handshake Behavior
+     3.4.  Mechanical Eviction
+   4.  The Ephemeral HPKE Challenge Exchange
+     4.1.  Origin Key Provisioning
+     4.2.  ClientHello Processing
+     4.3.  EncryptedExtensions Processing
+     4.4.  Derivation of psk_attest and Attestation Binder
+   5.  Intra-Handshake Evidence Delivery
+   6.  Key Schedule Integration and Proxy Eviction
+     6.1.  PSK-Injected Key Derivation
+     6.2.  Post-Handshake Re-Attestation
+   7.  Security Considerations
+     7.1.  Key Separation
+     7.2.  Transcript and Replay Binding
+     7.3.  Object-Level Confidentiality
+     7.4.  Non-cooperative and Malicious Intermediaries
+     7.5.  Interaction with Post-Handshake Attestation
+     7.6.  Key Substitution and Oracle Protection
+   8.  IANA Considerations
+   9.  References
+     9.1.  Normative References
+     9.2.  Informative References
+   Appendix A.  Related Work
+     A.1.  Relationship to WIMSE Workload Attestation
+     A.2.  Relationship to Remote Attestation over EDHOC
+     A.3.  Applicability to Multi-Verifier Deployments
+   Acknowledgments
+   Authors' Addresses
+
+1.  Introduction
+
+   This document operates within the Remote ATtestation procedureS
+   (RATS) architecture [RFC9334] and addresses a specific deployment
+   constraint: the presence of a TLS-terminating intermediary in the
+   path between a RATS Attester and its Relying Party.
+
+   A prominent class of deployments where this condition fails is the
+   enterprise environment.  Organizations deploying MDM-enrolled,
+   enterprise-controlled devices routinely route device-to-service
+   traffic through TLS-terminating infrastructure -- corporate reverse
+   proxies, API gateways, mobile device management policy enforcement
+   points, and enterprise web application firewalls.  In these
+   environments, the device holds a TLS connection to enterprise-managed
+   infrastructure, not to the remote attested origin with which it
+   ultimately communicates.
+
+   Major platform vendors, including cloud productivity and device
+   management providers, regularly publish lists of endpoints for which
+   TLS inspection must be disabled, sometimes referred to as compliance
+   modes.  These exclusions are necessary to prevent the intermediary
+   from interfering with the trust mechanisms those endpoints depend on.
+   These existing modes provide an opportunity to integrate Remote
+   Attestation, replacing "administrative trust" with cryptographic
+   proof that an intermediary is not party to sensitive application
+   data.
+
+   When a TLS-terminating intermediary is present, the client
+   establishes a TLS connection to the intermediary, and the
+   intermediary establishes a separate connection to the origin.  The
+   two connections have independent handshake transcripts.  Intra-
+   handshake attestation protocols that cryptographically bind Evidence
+   to the connection transcript are therefore binding to the client-to-
+   intermediary connection, not to the connection to the origin.  Any
+   attestation produced by the origin references a different
+   cryptographic context than the one the client holds.  The end-to-end
+   binding on which transport-layer attestation depends is severed at
+   the proxy boundary.
+
+   This document defines a cryptographic transport and proxy eviction
+   mechanism.  It does not define attestation Evidence profiles, claim
+   formats, or identity document structures.
+
+   The mechanism establishes binding for both intra-handshake
+   attestation (for example, Early Attestation
+   [I-D.fossati-seat-early-attestation]) and post-handshake attestation
+   (for example, EXPAT [I-D.fossati-seat-expat]).
+
+   These are named as examples; the mechanism is agnostic to the
+   specific attestation protocol.  For intra-handshake Evidence
+   delivery, this document uses the attestation extension defined in
+   [I-D.fossati-seat-early-attestation].
+
+2.  Terminology
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in
+   BCP 14 [RFC2119] [RFC8174] when, and only when, they appear in all
+   capitals, as shown here.
+
+   This document uses the following terms.
+
+   Cooperative intermediary:  A TLS-terminating proxy that forwards the
+      signalling defined in this document during connection
+      establishment and that honours the transition to Layer 4
+      forwarding upon key rotation.  A cooperative intermediary is not
+      part of the origin's Trusted Computing Base.
+
+   Client (Relying Party, RP):  The endpoint that verifies the origin's
+      attested properties.
+
+   Origin (Attesting Server):  The endpoint whose attested properties
+      the client wishes to verify, reachable only through one or more
+      intermediaries.
+
+   Ephemeral KEM key pair (skE / pkE):  A Key Encapsulation Mechanism
+      key pair generated fresh by the client for a single session and
+      never reused, used as the recipient key for HPKE Base Mode (Mode
+      0) [RFC9180] operations.
+
+   Origin KEM key (pkR):  The origin's KEM public key, distributed in an
+      Identity Document and authenticated by the client prior to the
+      handshake as described in the Origin Key Provisioning section.
+
+   Identity Document:  A signed document such as an EAT Attestation
+      Result (EAR) [I-D.ietf-rats-ear].  The Identity Document carries
+      pkR.  The signature provides a self-contained integrity guarantee,
+      allowing the document to be fetched over untrusted channels.
+
+   Challenge nonces (cnC, cnR):  Ephemeral random values exchanged
+      between client and origin under HPKE. cnC is generated by the
+      client and sealed to pkR; cnR is generated by the origin and
+      sealed to pkE.
+
+   psk_attest:  A symmetric secret derived from cnC and cnR.  It is
+      injected into the Extended Key Update key schedule to rotate
+      traffic keys, evicting the intermediary from the session.
+
+   Attestation Binder:  The cryptographic value bound into the
+      attestation Evidence, ensuring per-session freshness and end-to-
+      end connection binding.  In this document, it is derived from the
+      ephemeral KEM public keys exchanged during the HPKE challenge,
+      replacing the severed TLS transcript hash as the session anchor.
+
+3.  Overview
+
+   A TLS-terminating intermediary severs the RA+TLS channel binding on
+   which attestation depends, regardless of when attestation occurs.
+   Major platform vendors already define endpoint sets for which TLS
+   inspection must be disabled in order to preserve endpoint-specific
+   trust properties.  This document reuses that operational pattern and
+   replaces administrative exclusion with a cryptographic mechanism: the
+   proxy cooperates during handshake-time signalling, forwards encrypted
+   Evidence without decrypting it, and is then mechanically evicted from
+   Layer 7 visibility by an attestation-bound key update.
+
+   The mechanism is designed against the trust-boundary requirements
+   identified for proxy-fronted attested channels.  An implementation
+   conforming to this document:
+
+   1.  MUST establish a channel identity that is cryptographically bound
+       to the attested origin endpoint even though connection
+       establishment traverses a TLS-terminating intermediary.
+
+   2.  MUST use object-layer encryption for Evidence payloads to
+       maintain confidentiality from the Layer 7 intermediary.
+
+3.1.  Architectural Advantages
+
+   *No nested encryption.* Post-eviction, application data flows over
+   standard TLS traffic keys on the origin-bound channel.  No outer
+   tunnel wraps an inner tunnel; the attested connection carries
+   application data without additional encapsulation overhead.
+
+   *Broad deployment without per-application modification.* Attestation
+   is handled at the proxy and TLS library layer.  Every application
+   communicating through a cooperative intermediary receives attestation
+   coverage without modification, extending equally to legacy and modern
+   software in the same estate.
+
+   *Evidence privacy.* Evidence is encrypted independently of the TLS
+   session using object-level encryption.  The privacy motivation for
+   object-level protection in RATS deployments is discussed in
+   [I-D.ounsworth-rats-privacy-framework].  The cooperative intermediary
+   can read plaintext CMW routing headers but cannot access the Evidence
+   payload, maintaining confidentiality of an Attester's measurements
+   from infrastructure outside the broader network of trust.
+
+3.2.  State Machine
+
+   A session proceeds through the following states:
+
+   L7 Proxy Negotiation   Client and origin exchange HPKE-sealed
+          |               challenge nonces via nonce_challenge_ext;
+          |               the intermediary forwards the signalling
+          |               at Layer 7 and retains termination.
+          v
+   Intra-HS Attestation   End-to-end Evidence delivery via the
+          |               early-attestation TLS extension. Evidence
+          |               is wrapped in a CMW and COSE_Encrypt0.
+          |               The Proxy reads CMW headers and routes.
+          v
+   Handshake Complete     Standard TLS 1.3 handshake completes.
+          |
+          v
+   EKU Key Rotation       Immediately upon Finished, the client
+          |               initiates the Extended Key Update. This
+          |               step is unconditional and blind.
+          v
+   Proxy Eviction / L4    The intermediary cannot derive the
+          |               rotated keys and steps down to Layer 4
+          |               transparent forwarding.
+          v
+   Application Data       Application data flows over the E2E
+                          encrypted channel.
+
+                    Figure 1: Session state transitions
+
+3.3.  Proxy Handshake Behavior
+
+   The following diagram and algorithm define the complete behavior of a
+   cooperative intermediary executing a proxy-traversal session under
+   the Background Check Model.  The diagram borrows the message notation
+   of [I-D.fossati-seat-early-attestation] Figure 5; content fully
+   specified by that document is shown as ....  In the diagram, [EA §6
+   extensions] denotes the attestation negotiation extensions defined in
+   Section 6 of [I-D.fossati-seat-early-attestation].
+
+   Relying Party            TLS Proxy              Attesting Server
+        |                       |                         |
+        | ClientHello           |                         |
+        | + nonce_challenge_ext |                         |
+        |     (pkE, ctC)        |                         |
+        |---------------------->| [DETECT]                |
+        |                       | ClientHello             |
+        |                       | + nonce_challenge_ext   |
+        |                       |     (pkE, ctC) [fwd]    |
+        |                       |------------------------>|
+        |                       |                         |
+        |<======= ServerHello, both legs ================>|
+        |                       |                         |
+        |                       | {EncryptedExtensions}   |
+        |                       | + nonce_challenge_ext   |
+        |                       |       (ctR)             |
+        |                       |<------------------------|
+        | {EncryptedExtensions} |                         |
+        | + nonce_challenge_ext |                         |
+        |       (ctR) [relayed] |                         |
+        |<----------------------|                         |
+        |                       | {Certificate*}          |
+        |                       | + attestation*          |
+        |                       |<------------------------|
+        | {Certificate*}        |                         |
+        | + attestation*        |                         |
+        |   [cmw routed]        |                         |
+        |<----------------------|                         |
+        |                       |                         |
+        |<===== {CertVerify*} + {Finished}, both legs ===>|
+        |                       | [ARMED]                 |
+        | {Certificate*}        |                         |
+        | + attestation*        |                         |
+        |---------------------->|                         |
+        |                       | {Certificate*}          |
+        |                       | + attestation*          |
+        |                       |   [cmw routed]          |
+        |                       |------------------------>|
+        |<===== {CertVerify*} + {Finished}, both legs ===>|
+        |                       |                         |
+        | ExtendedKeyUpdate     |                         |
+        | [psk_attest]          |                         |
+        |---------------------->| [TRIGGERED]             |
+        |                       | ExtendedKeyUpdate       |
+        |                       |   [fwd, Buffer Drain]   |
+        |                       |------------------------>|
+        |                       |                         |
+        |   [Application Data -- end-to-end encrypted]    |
+        |<===============================================>|
+        |         (proxy: opaque L4 forwarder)            |
+
+      Figure 2: Proxy handshake message flow (Background Check Model)
+
+   The proxy MUST execute the following steps:
+
+   1.  Receive ClientHello from the RP.  If the ClientHello contains an
+       nonce_challenge_ext extension alongside one or more of the
+       attestation negotiation extensions defined in Section 6 of
+       [I-D.fossati-seat-early-attestation], enter DETECT state.
+       Otherwise, process as a standard TLS connection.
+
+   2.  Initiate the Leg B connection to the Attesting Server.  Construct
+       a ClientHello carrying all negotiation extensions from the RP's
+       ClientHello.  The nonce_challenge_ext extension MUST be forwarded
+       with pkE and ctC unchanged.
+
+   3.  Relay the ServerHello received from the Attesting Server to the
+       RP without modification.
+
+   4.  Relay the EncryptedExtensions received from the Attesting Server
+       to the RP.  The nonce_challenge_ext extension carrying ctR MUST
+       be forwarded unchanged.
+
+   5.  Receive the Certificate message from the Attesting Server.
+       Inspect the plaintext CMW ind header of the cmw_payload carried
+       in the attestation extension to determine routing.  Forward the
+       cmw_payload to the RP without decrypting the Evidence payload.
+
+   6.  Relay CertificateVerify and Finished from the Attesting Server to
+       the RP.  Enter ARMED state.
+
+   7.  Receive the Certificate message from the RP.  Inspect the
+       plaintext CMW ind header and route the cmw_payload to the
+       Attesting Server.  The Evidence payload MUST NOT be decrypted.
+
+   8.  Relay CertificateVerify and Finished from the RP to the Attesting
+       Server.
+
+   9.  Receive ExtendedKeyUpdate from the RP.  Enter TRIGGERED state.
+       Forward the ExtendedKeyUpdate to the Attesting Server.  Execute
+       the Buffer Drain procedure defined below.  Activate Layer 4
+       transparent forwarding for all subsequent records on both
+       connections.
+
+3.4.  Mechanical Eviction
+
+   Before the key update, the intermediary holds the application traffic
+   keys of the terminated connection and can read and rewrite
+   application records at Layer 7.  After the key update, the live
+   traffic keys are derived from main_secret_N+1, which is a function of
+   combined_ikm and therefore of psk_attest.  An entity that cannot
+   derive cnR cannot derive psk_attest, cannot compute main_secret_N+1,
+   and cannot derive any traffic key from it.
+
+   The DETECT, ARMED, and TRIGGERED state transitions governing eviction
+   are defined in the Proxy Handshake Behavior section.
+
+   Buffer Drain:  Before activating Layer 4 forwarding, the intermediary
+      MUST complete the following steps in the order given:
+
+      1.  The intermediary MUST cease reading from both the client-
+          facing and origin-facing transport connections.
+
+      2.  Any bytes received from the client-facing connection that have
+          been buffered beyond the final Extended Key Update record
+          boundary MUST be written to the origin-facing connection in
+          order, without modification or decryption.
+
+      3.  Any bytes received from the origin-facing connection that have
+          been buffered beyond the final Extended Key Update record
+          boundary MUST be written to the client-facing connection in
+          order, without modification or decryption.
+
+      4.  Only upon confirming that both transport directions have been
+          fully drained MUST the intermediary activate Layer 4
+          transparent forwarding for all subsequent records on both
+          flows of that session.
+
+      The intermediary MUST NOT activate Layer 4 forwarding before
+      completing steps 1 through 4.  Bytes forwarded in steps 2 and 3
+      are post-rotation ciphertext that the intermediary cannot decrypt;
+      they MUST be treated as opaque octets.
+
+4.  The Ephemeral HPKE Challenge Exchange
+
+   The challenge exchange is carried in a single TLS extension,
+   nonce_challenge_ext, which appears with distinct contents in the
+   ClientHello and in the EncryptedExtensions.  Its presence is the
+   capability signal for this mechanism; an intermediary that does not
+   recognise it forwards it unmodified, and an origin that does not
+   support it omits the EncryptedExtensions variant.
+
+4.1.  Origin Key Provisioning
+
+   Before initiating the handshake, the client MUST obtain and
+   authenticate the origin's KEM public key pkR.  Clients MUST maintain
+   a trust anchor store from which the Identity Document can be
+   authenticated; trust anchors MAY be self-signed certificates, raw
+   public keys, or JWK keys [RFC7517].  The details of trust anchor
+   maintenance and path validation are outside the scope of this
+   document.
+
+   pkR is distributed in an Identity Document, such as an EAR
+   [I-D.ietf-rats-ear] whose ear_managed_keysets claim carries pkR as a
+   JWK [RFC7517] with key_ops set to ["encrypt"], under the keyset name
+   "hpke-kem-key".  Because the EAR's Verifier signature provides a
+   self-contained integrity guarantee, the fetch MAY occur over
+   untrusted channels.
+
+   The client MUST verify the EAR signature against its trust anchor
+   store and extract pkR from the "hpke-kem-key" entry of
+   ear_managed_keysets before proceeding with ClientHello processing.
+
+4.2.  ClientHello Processing
+
+   Prior to the handshake the client obtains pkR as described in the
+   Origin Key Provisioning section above.  The client generates a fresh,
+   single-use ephemeral KEM key pair (skE, pkE), generates a random
+   challenge nonce cnC, and seals it to the origin using HPKE Base Mode
+   (Mode 0) as defined in Section 5.1 of [RFC9180].
+
+   aad_ct = Hash(pkR || ClientHello.random || NegotiationOffer)
+
+   /* HPKE Base Mode (RFC 9180, Section 5.1) */
+   ctC = HPKE-Base-Seal(pkR, aad_ct, cnC)
+
+   The client places pkE and ctC in the nonce_challenge_ext extension of
+   the ClientHello.  aad_ct binds the ciphertext to the target origin's
+   KEM key, the client's fresh random, and the negotiated key-exchange
+   parameters, so the ciphertext cannot be replayed to a different
+   origin or across sessions.
+
+   The intermediary forwards the ClientHello to the origin.  Because the
+   intermediary does not hold skR, it cannot recover cnC.
+
+4.3.  EncryptedExtensions Processing
+
+   The origin recovers the nonce by decapsulation using HPKE Base Mode:
+
+   aad_ct = Hash(pkR || ClientHello.random || NegotiationOffer)
+
+   /* HPKE Base Mode (RFC 9180, Section 5.1) */
+   cnC = HPKE-Base-Open(skR, aad_ct, ctC)
+
+   Successful opening proves the origin's possession of skR.  The origin
+   generates its counter-challenge cnR and seals it to the client's
+   ephemeral key, again using HPKE Base Mode:
+
+   aad_ee = Hash(cnC)
+
+   /* HPKE Base Mode (RFC 9180, Section 5.1) */
+   ctR = HPKE-Base-Seal(pkE, aad_ee, cnR)
+
+   The origin returns ctR in the nonce_challenge_ext extension of the
+   EncryptedExtensions.  The client recovers cnR:
+
+   aad_ee = Hash(cnC)
+
+   /* HPKE Base Mode (RFC 9180, Section 5.1) */
+   cnR = HPKE-Base-Open(skE, aad_ee, ctR)
+
+   Only the holder of skE -- the client -- can recover cnR.
+
+4.4.  Derivation of psk_attest and Attestation Binder
+
+   Both endpoints now hold both nonces.  The end-to-end Attestation
+   Binder is derived from the ephemeral KEM public keys exchanged during
+   the HPKE challenge:
+
+   c_attest_binder = HKDF-Expand-Label(0, "attestation",
+                       Hash(TLS_Client_Public_Key || pkR), Hash.length)
+   s_attest_binder = HKDF-Expand-Label(0, "attestation",
+                       Hash(TLS_Server_Public_Key || pkE), Hash.length)
+
+   Hash is the hash of the negotiated TLS 1.3 cipher suite.
+
+   By incorporating the respective ephemeral KEM public key into the
+   context hash, the Attestation Binder locks the resulting Evidence to
+   the specific HPKE parameters used to traverse the proxy, binding the
+   Evidence to the true end-to-end participants and replacing the
+   severed proxy transcript.
+
+5.  Intra-Handshake Evidence Delivery
+
+   Evidence is delivered during the TLS handshake via the attestation
+   extension in the Certificate message, as defined in
+   [I-D.fossati-seat-early-attestation].  However, to ensure the
+   cooperative intermediary can route the evidence without violating the
+   confidentiality of the workload, the payload MUST be structured as
+   follows:
+
+   1.  Evidence Generation: The Attester generates its Evidence (e.g.,
+       an EAT) and binds it to the session by placing rdata in the
+       eat_nonce claim, where rdata is computed as:
+
+      rdata = Hash(s_attest_binder || psk_attest)
+
+       This commits the signed Evidence to both the KEM public keys (via
+       s_attest_binder) and the dual-nonce session secret (via
+       psk_attest), ensuring the quote is bound to the full end-to-end
+       exchange.  To cryptographically commit to the proxy-traversing
+       HPKE exchange and prevent the TEE from acting as a blind signing
+       oracle, the Evidence MUST explicitly include the public
+       parameters of the origin KEM key (pkR) within the standardized
+       cnf claim.
+
+   2.  Object-Level Encryption: To preserve confidentiality from the
+       terminating intermediary, the Evidence MUST be encrypted to the
+       public key of the receiving endpoint, for example using
+       COSE_Encrypt0.  This follows the object-level confidentiality
+       architecture discussed in [I-D.ounsworth-rats-privacy-framework].
+
+   3.  CMW Encapsulation: The encrypted envelope is placed inside a
+       Conceptual Message Wrapper (CMW) Record [I-D.ietf-rats-msg-wrap].
+       The outer CMW headers (such as the ind field indicating Evidence)
+       remain in plaintext.
+
+   Because the cooperative intermediary terminates TLS, it generates its
+   own Certificate message for the backend connection to the origin and
+   MUST actively move the attestation extension between the two
+   connections.  Adapting the routing role of the Lead Verifier
+   [I-D.ietf-rats-multi-verifier] to a zero-trust posture, the
+   intermediary acts only as a router and never as a Verifier: it MUST
+   NOT decrypt, decode, or appraise the inner Evidence.  The complete
+   routing procedure is defined in the Proxy Handshake Behavior section,
+   steps 5 and 7.
+
+6.  Key Schedule Integration and Proxy Eviction
+
+   Immediately upon completion of the TLS handshake, the client
+   initiates an Extended Key Update [I-D.ietf-tls-extended-key-update]
+   that injects psk_attest into the key schedule.  This rotates the
+   application traffic keys to values that incorporate attestation-
+   derived keying material inaccessible to the intermediary.
+
+6.1.  PSK-Injected Key Derivation
+
+   The Extended Key Update performs a fresh (EC)DHE (or KEM) exchange
+   yielding the shared secret eku_dh_shared.  In the standard EKU key
+   schedule, Derive-Secret(main_secret_N, "derived", "") serves as the
+   HKDF-Extract salt, chaining the new secret to the prior session
+   state.  Because the proxy terminated the original TLS connection, the
+   client and origin do not share a common main_secret_N; applying that
+   derivation would produce mismatched keys at the two endpoints.
+
+   This document therefore mandates a key schedule reset: the HKDF-
+   Extract salt MUST be set to 0, severing the chain to the proxy-
+   terminated session, and the input keying material MUST be the
+   concatenation of eku_dh_shared and psk_attest.  A zero salt instructs
+   the key schedule to treat this rotation as a fresh derivation
+   anchored entirely in combined_ikm, analogous to how TLS 1.3 derives
+   its Early Secret from a PSK with no prior session state.
+
+   combined_ikm = eku_dh_shared || psk_attest
+
+                   0 (zero-length salt)
+                   |
+                   v
+   combined_ikm -> HKDF-Extract = main_secret_N+1
+                   |
+                   +-----> Derive-Secret(., "c ap traffic",
+                   |                     transcript_hash_N+1)
+                   |             = client_application_traffic_secret_N+1
+                   |
+                   +-----> Derive-Secret(., "s ap traffic",
+                   |                     transcript_hash_N+1)
+                   |             = server_application_traffic_secret_N+1
+                   |
+                   +-----> Derive-Secret(., "exp master",
+                   |                     transcript_hash_N+1)
+                                 = exporter_secret_N+1
+
+         Figure 3: Key Derivation Hierarchy with Key Schedule Reset
+
+6.2.  Post-Handshake Re-Attestation
+
+   After eviction the client and origin share a common main_secret_N+1
+   and the connection is an ordinary end-to-end TLS session.  Any
+   subsequent Extended Key Update is therefore a normal end-to-end
+   exchange: the proxy is already a Layer 4 forwarder and plays no
+   cryptographic role, so the key schedule reset used at eviction does
+   not apply and standard EKU chaining
+   [I-D.ietf-tls-extended-key-update] is used.
+
+   Each such rotation produces a fresh transcript_hash_N+1 and a fresh
+   exporter_secret_N+1, suitable for anchoring a new round of
+   attestation: an intra-handshake-style mechanism re-anchors to the
+   transcript, and a post-handshake-style mechanism re-anchors to the
+   exporter.
+
+   For example, EXPAT [I-D.fossati-seat-expat] performs its initial
+   attestation immediately after the handshake completes and re-attests
+   by initiating a fresh Exported Authenticator exchange.  This
+   mechanism aligns its Extended Key Update to that same post-handshake
+   instant; the resulting exporter_secret_N+1 is the end-to-end exporter
+   the EXPAT binder consumes, which the evicted intermediary cannot
+   reproduce.  No element of the post-handshake protocol is otherwise
+   modified.
+
+7.  Security Considerations
+
+   The adversary of concern is a TLS-terminating intermediary that
+   attempts to retain unauthorised Layer 7 visibility after the point at
+   which it is expected to step down to Layer 4 forwarding, or attempts
+   to read sensitive Evidence payloads.
+
+7.1.  Key Separation
+
+   The mechanism relies on the separation between the key-encapsulation
+   role (the KEM key pair) and the TLS identity/authentication role.
+   The ephemeral skE is generated by the client, never transmitted, and
+   never reused.  An intermediary that terminates TLS observes every
+   plaintext handshake message, including the EncryptedExtensions
+   carrying ctR, yet cannot open ctR without skE.
+
+7.2.  Transcript and Replay Binding
+
+   Because the TLS-terminating intermediary breaks the native TLS
+   transcript hash by terminating the connection, the end-to-end
+   Attestation Binder is derived from the out-of-band HPKE exchange
+   instead.  aad_ct binds ctC to pkR, the ClientHello random, and the
+   negotiated parameters, preventing replay to a different origin or
+   session.  aad_ee is Hash(cnC): because cnC was HPKE-sealed to pkR and
+   is never transmitted in the clear, the intermediary cannot observe
+   it, making aad_ee opaque to the proxy despite the severed transcript.
+   An adversary cannot transfer either ciphertext to a different origin
+   or a different handshake.
+
+7.3.  Object-Level Confidentiality
+
+   Because the proxy terminates TLS, the Certificate message is visible
+   to the proxy in plaintext.  The confidentiality of the Attester's
+   Evidence relies entirely on the object-level encryption (e.g.,
+   COSE_Encrypt0) applied to the Evidence payload.  The proxy can only
+   view the unencrypted outer CMW routing headers.  This confidentiality
+   guarantee is independent of transport security: the Evidence payload
+   remains confidential from the intermediary regardless of whether it
+   is cooperative or hostile, because confidentiality is a property of
+   the object, not the channel.  The privacy architecture motivating
+   this object-level protection is discussed in
+   [I-D.ounsworth-rats-privacy-framework].
+
+7.4.  Non-cooperative and Malicious Intermediaries
+
+   A non-cooperative intermediary that suppresses the
+   nonce_challenge_ext extension or refuses the Extended Key Update
+   eviction trigger cannot derive post-rotation traffic keys.  The
+   session terminates rather than continuing on a compromised channel,
+   providing fail-secure behaviour against both misconfigured and
+   malicious intermediaries without requiring explicit detection of
+   adversarial intent.
+
+7.5.  Interaction with Post-Handshake Attestation
+
+   Intra-handshake Evidence delivery and the Extended Key Update
+   complete before any post-handshake protocol window opens.  For
+   mechanisms such as EXPAT [I-D.fossati-seat-expat] that depend on an
+   end-to-end channel, this ordering structurally closes the race
+   condition that arises when Exported Authenticators operate over a
+   proxy-terminated session.
+
+   Section 5.2.2 of [RFC9261] explicitly states that if the party
+   generating an Exported Authenticator does so on a different
+   connection than the party validating it -- including situations in
+   which application data is sent via a TLS-terminating proxy -- the
+   Handshake Context will not match and the CertificateVerify will not
+   validate.
+
+   The tls-exporter binding defined in [RFC9266] is unique to each TLS
+   connection; a terminating proxy creates two independent sessions with
+   independent EKM values, producing exactly this condition.  EXPAT
+   [I-D.fossati-seat-expat], which builds on Exported Authenticators,
+   therefore cannot function across a TLS-terminating proxy without the
+   end-to-end channel this document restores.  The mechanism defined
+   here is a prerequisite for EXPAT to function in proxy-fronted
+   deployments.
+
+7.6.  Key Substitution and Oracle Protection
+
+   Key binding to an attested execution environment is a complementary
+   concern addressed by [I-D.reddy-rats-key-binding].
+
+   In proxy-fronted topologies, the TLS handshake is terminated by the
+   intermediary, removing the standard transport-layer proofs of
+   possession.  If the origin TEE signs an Attestation Binder provided
+   by the untrusted host OS without cryptographically committing to the
+   key exchange material, an active attacker could execute the HPKE
+   challenge exchange themselves and use the TEE as a blind signing
+   oracle, producing valid-looking Evidence bound to attacker-controlled
+   KEM parameters.
+
+   To mitigate this, the Evidence MUST explicitly carry the public
+   parameters of the key that executed the HPKE decapsulation (pkR)
+   using the EAT cnf claim.  By enforcing this parameter-by-parameter
+   match, the protocol guarantees that the private component of the key
+   executing the HPKE exchange is physically confined within the exact
+   execution context being attested, wholly mitigating key substitution.
+
+8.  IANA Considerations
+
+   IANA is requested to register the following entry in the "TLS
+   ExtensionType Values" registry [RFC8446]:
+
+    +=======+=====================+=========+===========+=============+
+    | Value | Extension Name      | TLS 1.3 | DTLS-Only | Recommended |
+    +=======+=====================+=========+===========+=============+
+    | TBD1  | nonce_challenge_ext | CH, EE  | N         | Y           |
+    +-------+---------------------+---------+-----------+-------------+
+
+             Table 1: Requested TLS ExtensionType registration
+
+   The nonce_challenge_ext extension is permitted in the ClientHello
+   (CH) and in the EncryptedExtensions (EE); its contents differ per
+   message as defined in this document.  Its presence in
+   EncryptedExtensions is conditional on its presence in the
+   corresponding ClientHello.
+
+9.  References
+
+9.1.  Normative References
+
+   [I-D.fossati-seat-early-attestation]
+              Sheffer, Y., Mihalcea, I., Deshpande, Y., Fossati, T., and
+              T. Reddy.K, "Using Attestation in Transport Layer Security
+              (TLS) and Datagram Transport Layer Security (DTLS)", Work
+              in Progress, Internet-Draft, draft-fossati-seat-early-
+              attestation-04, 27 May 2026,
+              <https://datatracker.ietf.org/doc/html/draft-fossati-seat-
+              early-attestation-04>.
+
+   [I-D.ietf-rats-ear]
+              Fossati, T., Voit, E., Trofimov, S., and H. Birkholz, "EAT
+              Attestation Results", Work in Progress, Internet-Draft,
+              draft-ietf-rats-ear-04, 26 May 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-rats-
+              ear-04>.
+
+   [I-D.ietf-rats-msg-wrap]
+              Birkholz, H., Smith, N., Fossati, T., Tschofenig, H., and
+              D. Glaze, "RATS Conceptual Messages Wrapper (CMW)", Work
+              in Progress, Internet-Draft, draft-ietf-rats-msg-wrap-23,
+              11 December 2025, <https://datatracker.ietf.org/doc/html/
+              draft-ietf-rats-msg-wrap-23>.
+
+   [I-D.ietf-tls-extended-key-update]
+              Tschofenig, H., Tüxen, M., Reddy.K, T., Fries, S., and Y.
+              Rosomakho, "Extended Key Update for Transport Layer
+              Security (TLS) 1.3", Work in Progress, Internet-Draft,
+              draft-ietf-tls-extended-key-update-12, 6 April 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-tls-
+              extended-key-update-12>.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119,
+              DOI 10.17487/RFC2119, March 1997,
+              <https://www.rfc-editor.org/rfc/rfc2119>.
+
+   [RFC5869]  Krawczyk, H. and P. Eronen, "HMAC-based Extract-and-Expand
+              Key Derivation Function (HKDF)", RFC 5869,
+              DOI 10.17487/RFC5869, May 2010,
+              <https://www.rfc-editor.org/rfc/rfc5869>.
+
+   [RFC7517]  Jones, M., "JSON Web Key (JWK)", RFC 7517,
+              DOI 10.17487/RFC7517, May 2015,
+              <https://www.rfc-editor.org/rfc/rfc7517>.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC
+              2119 Key Words", BCP 14, RFC 8174, DOI 10.17487/RFC8174,
+              May 2017, <https://www.rfc-editor.org/rfc/rfc8174>.
+
+   [RFC8446]  Rescorla, E., "The Transport Layer Security (TLS) Protocol
+              Version 1.3", RFC 8446, DOI 10.17487/RFC8446, August 2018,
+              <https://www.rfc-editor.org/rfc/rfc8446>.
+
+   [RFC9180]  Barnes, R., Bhargavan, K., Lipp, B., and C. Wood, "Hybrid
+              Public Key Encryption", RFC 9180, DOI 10.17487/RFC9180,
+              February 2022, <https://www.rfc-editor.org/rfc/rfc9180>.
+
+   [RFC9334]  Birkholz, H., Thaler, D., Richardson, M., Smith, N., and
+              W. Pan, "Remote ATtestation procedureS (RATS)
+              Architecture", RFC 9334, DOI 10.17487/RFC9334, January
+              2023, <https://www.rfc-editor.org/rfc/rfc9334>.
+
+9.2.  Informative References
+
+   [I-D.fossati-seat-expat]
+              Sardar, M. U., Fossati, T., Reddy.K, T., Sheffer, Y.,
+              Tschofenig, H., and I. Mihalcea, "Remote Attestation with
+              Exported Authenticators", Work in Progress, Internet-
+              Draft, draft-fossati-seat-expat-02, 26 February 2026,
+              <https://datatracker.ietf.org/doc/html/draft-fossati-seat-
+              expat-02>.
+
+   [I-D.ietf-lake-ra]
+              Song, Y. and G. Selander, "Remote attestation over EDHOC",
+              Work in Progress, Internet-Draft, draft-ietf-lake-ra-05,
+              26 April 2026, <https://datatracker.ietf.org/doc/html/
+              draft-ietf-lake-ra-05>.
+
+   [I-D.ietf-rats-multi-verifier]
+              Deshpande, Y., jun, Z., Labiod, H., and H. Birkholz,
+              "Remote Attestation with Multiple Verifiers", Work in
+              Progress, Internet-Draft, draft-ietf-rats-multi-verifier-
+              00, 5 May 2026, <https://datatracker.ietf.org/doc/html/
+              draft-ietf-rats-multi-verifier-00>.
+
+   [I-D.ounsworth-rats-privacy-framework]
+              Ounsworth, M., Tschofenig, H., and G. Lehmann, "Privacy
+              Framework for Remote ATtestation procedureS", Work in
+              Progress, Internet-Draft, draft-ounsworth-rats-privacy-
+              framework-00, 18 June 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ounsworth-
+              rats-privacy-framework-00>.
+
+   [I-D.reddy-rats-key-binding]
+              Reddy.K, T., Tschofenig, H., Fossati, T., and I. Mihalcea,
+              "Key Attestation for Entity Attestation Tokens (EAT)",
+              Work in Progress, Internet-Draft, draft-reddy-rats-key-
+              binding-01, 7 June 2026,
+              <https://datatracker.ietf.org/doc/html/draft-reddy-rats-
+              key-binding-01>.
+
+   [I-D.reddy-wimse-workload-attestation]
+              Reddy.K, T. and N. Ritz, "WIMSE Workload Attestation",
+              Work in Progress, Internet-Draft, draft-reddy-wimse-
+              workload-attestation-00, 7 June 2026,
+              <https://datatracker.ietf.org/doc/html/draft-reddy-wimse-
+              workload-attestation-00>.
+
+   [RFC9261]  Sullivan, N., "Exported Authenticators in TLS", RFC 9261,
+              DOI 10.17487/RFC9261, July 2022,
+              <https://www.rfc-editor.org/rfc/rfc9261>.
+
+   [RFC9266]  Whited, S., "Channel Bindings for TLS 1.3", RFC 9266,
+              DOI 10.17487/RFC9266, July 2022,
+              <https://www.rfc-editor.org/rfc/rfc9266>.
+
+Appendix A.  Related Work
+
+   This appendix positions the transport-layer proxy eviction mechanism
+   defined in this document relative to adjacent work on application-
+   layer attestation, gateway-mediated attestation, and multi-verifier
+   appraisal.
+
+A.1.  Relationship to WIMSE Workload Attestation
+
+   [I-D.reddy-wimse-workload-attestation] addresses the same deployment
+   topology at the HTTP application layer, requiring no changes to TLS
+   or proxy infrastructure.  This document operates at the transport
+   layer and is applicable independently of application protocol.  WIMSE
+   Workload Attestation addresses deployments where application-layer
+   carry of attestation information is readily available or where
+   cooperative TLS intermediaries are not available.
+
+A.2.  Relationship to Remote Attestation over EDHOC
+
+   The structural problem this document addresses is not specific to
+   TLS.  Remote Attestation over EDHOC [I-D.ietf-lake-ra] defines an
+   Attestation Binder derived from the EDHOC transcript, serving the
+   same relay-attack mitigation function as the transcript-based binder
+   in TLS.  When a gateway terminates EDHOC between an Attester and its
+   ultimate Relying Party, that binding is severed at the gateway
+   boundary, creating conditions for a relay attack regardless of
+   whether the Evidence payload is sensitive.  The cooperative blind-
+   routing pattern defined in this document is architecturally
+   applicable to this scenario; however, that treatment is out of scope
+   for the current revision of this document (-00).
+
+A.3.  Applicability to Multi-Verifier Deployments
+
+   In the hierarchical multi-verifier topology defined in
+   [I-D.ietf-rats-multi-verifier], a Lead Verifier coordinates appraisal
+   of a Composite Attester by receiving all Composite Evidence,
+   decomposing it, and routing Partial Evidence to the appropriate
+   Component Verifiers.
+
+   This structural position gives the Lead Verifier visibility into
+   Evidence it may not be authorised to appraise -- a concern explicitly
+   identified in the Privacy Considerations of
+   [I-D.ietf-rats-multi-verifier], which notes that Evidence containing
+   sensitive information should be encrypted so that it can only be
+   accessed by the intended Verifier.
+
+   The cooperative blind-routing pattern defined in this document is
+   applicable at the appraisal layer: object-level encryption of Partial
+   Evidence to the target Component Verifier's key, with CMW plaintext
+   headers carrying the routing directive, allows the Lead Verifier to
+   route Evidence it cannot read -- converting an operational
+   recommendation into a cryptographic guarantee.
+
+Acknowledgments
+
+   TODO
+
+Authors' Addresses
+
+   Nathanael Ritz
+   Independent
+   Email: ietf@nritz.com
+
+
+   Ionuț Mihalcea
+   ARM
+   Email: ionut.mihalcea@arm.com
+
+
+   Hannes Tschofenig
+   University of Applied Sciences Bonn-Rhein-Sieg
+   Email: Hannes.Tschofenig@gmx.net
+
+
+   Tirumaleswar Reddy
+   Nokia
+   Email: kondtir@gmail.com
