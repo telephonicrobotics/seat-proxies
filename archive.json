@@ -1,6 +1,6 @@
 {
   "magic": "E!vIA5L86J2I",
-  "timestamp": "2026-06-28T04:02:49.169407+00:00",
+  "timestamp": "2026-06-30T03:52:29.679896+00:00",
   "repo": "telephonicrobotics/seat-proxies",
   "labels": [
     {
@@ -50,5 +50,58 @@
     }
   ],
   "issues": [],
-  "pulls": []
+  "pulls": [
+    {
+      "number": 1,
+      "id": "PR_kwDOTFKTNs7r46dS",
+      "title": "Author Info Update",
+      "url": "https://github.com/telephonicrobotics/seat-proxies/pull/1",
+      "state": "OPEN",
+      "author": "hannestschofenig",
+      "authorAssociation": "COLLABORATOR",
+      "assignees": [],
+      "labels": [],
+      "body": "",
+      "createdAt": "2026-06-29T17:32:11Z",
+      "updatedAt": "2026-06-29T17:32:12Z",
+      "baseRepository": "telephonicrobotics/seat-proxies",
+      "baseRefName": "main",
+      "baseRefOid": "c2cfd9ff51f736f01b24d6b2f8a839c9e166ec64",
+      "headRepository": "telephonicrobotics/seat-proxies",
+      "headRefName": "hannestschofenig-patch-1",
+      "headRefOid": "1da6a7b7649179a59ded9c877e5751392382cea1",
+      "closedAt": null,
+      "mergedAt": null,
+      "mergedBy": null,
+      "mergeCommit": null,
+      "comments": [],
+      "reviews": []
+    },
+    {
+      "number": 2,
+      "id": "PR_kwDOTFKTNs7r6R20",
+      "title": "Restructuring draft",
+      "url": "https://github.com/telephonicrobotics/seat-proxies/pull/2",
+      "state": "OPEN",
+      "author": "hannestschofenig",
+      "authorAssociation": "COLLABORATOR",
+      "assignees": [],
+      "labels": [],
+      "body": "I made an attempt to restructure the draft so that it easier to read. (At least I believe it is easier to read.)\r\n\r\nThere are more changes to be made but this is maybe a start. In particular, I made the following changes:\r\n\r\n\r\n- Shortened abstract\r\n- Extended introduction\r\n- Moved related work into the appendix\r\n- Fixed a few typos",
+      "createdAt": "2026-06-29T18:38:49Z",
+      "updatedAt": "2026-06-29T18:38:49Z",
+      "baseRepository": "telephonicrobotics/seat-proxies",
+      "baseRefName": "main",
+      "baseRefOid": "c2cfd9ff51f736f01b24d6b2f8a839c9e166ec64",
+      "headRepository": "telephonicrobotics/seat-proxies",
+      "headRefName": "restructuring",
+      "headRefOid": "9bcf2d2747072cdaab9674b12ece9e89a64add74",
+      "closedAt": null,
+      "mergedAt": null,
+      "mergedBy": null,
+      "mergeCommit": null,
+      "comments": [],
+      "reviews": []
+    }
+  ]
 }
